@@ -29,7 +29,7 @@ intents = discord.Intents.none()
 intents.guilds = True
 intents.voice_states = True
 
-intro_config = {"voice_channel_id": DEFAULT_INTRO_VOICE_CHANNEL_ID, "role_id": None, "message_channel_id": None, "message_id": None}
+intro_config = {"voice_channel_id": DEFAULT_INTRO_VOICE_CHANNEL_ID, "role_id": None, "remove_role_id": None, "message_channel_id": None, "message_id": None}
 intro_queue = asyncio.Queue()
 audio_lock = asyncio.Lock()
 queue_task = None
@@ -53,6 +53,7 @@ def config_payload():
     return {
         "voice_channel_id": intro_config["voice_channel_id"],
         "role_id": intro_config["role_id"],
+        "remove_role_id": intro_config["remove_role_id"],
     }
 
 
@@ -73,6 +74,7 @@ async def load_config(guild: discord.Guild):
                 intro_config.update({
                     "voice_channel_id": int(data["voice_channel_id"]) if data.get("voice_channel_id") else None,
                     "role_id": int(data["role_id"]) if data.get("role_id") else None,
+                    "remove_role_id": int(data["remove_role_id"]) if data.get("remove_role_id") else None,
                     "message_channel_id": channel.id,
                     "message_id": message.id,
                 })
@@ -198,14 +200,19 @@ async def grant_completion_role(guild: discord.Guild, member_id: int):
         print(f"Configured intro role {role_id} no longer exists", flush=True)
         return
 
-    if role in member.roles:
-        return
+    remove_role_id = intro_config.get("remove_role_id")
+    remove_role = guild.get_role(remove_role_id) if remove_role_id else None
 
     try:
-        await member.add_roles(role, reason="Completed the full Meta voice intro")
-        print(f"Granted intro role {role.name} to {member}", flush=True)
+        if remove_role and remove_role in member.roles:
+            await member.remove_roles(remove_role, reason="Completed the full Meta voice intro")
+            print(f"Removed intro role {remove_role.name} from {member}", flush=True)
+
+        if role not in member.roles:
+            await member.add_roles(role, reason="Completed the full Meta voice intro")
+            print(f"Granted intro role {role.name} to {member}", flush=True)
     except Exception as exc:
-        print(f"ROLE_GRANT_ERROR member={member_id} role={role_id}: {exc!r}", flush=True)
+        print(f"ROLE_UPDATE_ERROR member={member_id} give={role_id} remove={remove_role_id}: {exc!r}", flush=True)
 
 
 async def intro_queue_worker():
@@ -248,6 +255,7 @@ async def health(request):
         "voiceConnected": bool(voice and voice.is_connected()),
         "voiceChannelId": str(voice.channel.id) if voice and voice.is_connected() else None,
         "configuredRoleId": str(intro_config["role_id"]) if intro_config["role_id"] else None,
+        "configuredRemoveRoleId": str(intro_config["remove_role_id"]) if intro_config["remove_role_id"] else None,
     })
 
 
@@ -305,10 +313,11 @@ async def intro_command(interaction: discord.Interaction):
         await interaction.followup.send(f"I could not play the voice intro: {exc}", ephemeral=True)
 
 
-@client.tree.command(name="introconfig", description="Set the 24/7 intro voice channel and completion role")
+@client.tree.command(name="introconfig", description="Set the intro VC, role to give, and optional role to remove")
 @app_commands.describe(
     voice_channel="Voice channel Meta Support should stay in",
     role="Role given after a member stays for the full intro",
+    remove_role="Optional role removed after a member finishes the intro",
 )
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.guilds(discord.Object(id=GUILD_ID))
@@ -316,25 +325,35 @@ async def introconfig_command(
     interaction: discord.Interaction,
     voice_channel: discord.VoiceChannel,
     role: discord.Role,
+    remove_role: discord.Role | None = None,
 ):
     await interaction.response.defer(ephemeral=True, thinking=True)
 
     me = interaction.guild.me
-    if role >= me.top_role and interaction.guild.owner_id != client.user.id:
+    if role >= me.top_role:
         await interaction.followup.send(
             "I can't give that role because it is at or above my highest role. Move the reward role below **Meta Support**.",
             ephemeral=True,
         )
         return
 
+    if remove_role and remove_role >= me.top_role:
+        await interaction.followup.send(
+            "I can't remove that role because it is at or above my highest role. Move it below **Meta Support**.",
+            ephemeral=True,
+        )
+        return
+
     intro_config["voice_channel_id"] = voice_channel.id
     intro_config["role_id"] = role.id
+    intro_config["remove_role_id"] = remove_role.id if remove_role else None
 
     try:
         await save_config(interaction)
         await ensure_voice_connection(interaction.guild)
+        remove_text = f" and remove **{remove_role.name}**" if remove_role else ""
         await interaction.followup.send(
-            f"Intro setup saved. I'll stay in **{voice_channel.name}** and give **{role.name}** after someone remains for the entire intro.",
+            f"Intro setup saved. I'll stay in **{voice_channel.name}**, give **{role.name}**{remove_text} after someone remains for the entire intro.",
             ephemeral=True,
         )
     except Exception as exc:
