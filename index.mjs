@@ -117,61 +117,25 @@ async function speakIntroInVoice(guild, preferredChannel = null) {
   const voiceChannel = await pickIntroVoiceChannel(guild, preferredChannel)
   if (!voiceChannel) throw new Error('No voice channel available for the intro')
 
-  const connection = joinVoiceChannel({
-    channelId: voiceChannel.id,
-    guildId: guild.id,
-    adapterCreator: guild.voiceAdapterCreator,
-    selfDeaf: true,
-    selfMute: false,
-    daveEncryption: false,
-    debug: true,
+  const workerUrl = process.env.VOICE_WORKER_URL
+  const workerSecret = process.env.VOICE_WORKER_SECRET
+  if (!workerUrl || !workerSecret) throw new Error('Voice worker is not configured')
+
+  const response = await fetch(workerUrl.replace(/\/$/, '') + '/intro', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-voice-secret': workerSecret,
+    },
+    body: JSON.stringify({ channelId: voiceChannel.id }),
   })
 
-  connection.on('debug', message => console.log('[VOICE]', message))
-  connection.on('stateChange', (oldState, newState) => {
-    console.log('[VOICE STATE]', oldState.status, '->', newState.status)
-  })
-
-  try {
-    await entersState(connection, VoiceConnectionStatus.Ready, 15_000)
-
-    const speech = 'Welcome to Meta. Meta Support is online. Use slash help to see everything I can do.'
-    const url = googleTTS.getAudioUrl(speech, { lang: 'en', slow: false, host: 'https://translate.google.com' })
-
-    if (!ffmpegPath) throw new Error('FFmpeg is unavailable')
-    const ffmpeg = spawn(ffmpegPath, [
-      '-loglevel', 'error',
-      '-i', url,
-      '-f', 's16le',
-      '-ar', '48000',
-      '-ac', '2',
-      'pipe:1',
-    ], { stdio: ['ignore', 'pipe', 'pipe'] })
-
-    let ffmpegError = ''
-    ffmpeg.stderr.on('data', chunk => { ffmpegError += chunk.toString() })
-
-    const player = createAudioPlayer({
-      behaviors: { noSubscriber: NoSubscriberBehavior.Play },
-    })
-    const resource = createAudioResource(ffmpeg.stdout, { inputType: StreamType.Raw })
-    connection.subscribe(player)
-
-    const finished = new Promise((resolve, reject) => {
-      player.once(AudioPlayerStatus.Idle, resolve)
-      player.once('error', reject)
-      ffmpeg.once('error', reject)
-      ffmpeg.once('close', code => {
-        if (code && code !== 0) reject(new Error('FFmpeg exited with code ' + code + ': ' + ffmpegError.slice(-300)))
-      })
-    })
-
-    player.play(resource)
-    await finished
-    console.log('Voice intro played in channel=' + voiceChannel.id)
-  } finally {
-    connection.destroy()
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok || !data.ok) {
+    throw new Error(data.error || ('Voice worker failed with HTTP ' + response.status))
   }
+
+  console.log('Voice worker played intro in channel=' + voiceChannel.id)
 }
 
 async function sendIntro(member) {
