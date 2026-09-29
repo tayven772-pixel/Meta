@@ -60,31 +60,57 @@ def config_payload():
 
 
 async def load_config(guild: discord.Guild):
-    # Search recent messages for the most recent config marker written by this bot.
+    # Persist settings in a bot-authored Discord message so they survive Render restarts.
+    # Search a deeper history and choose the newest valid config across all readable channels.
+    newest = None
+
     for channel in guild.text_channels:
         perms = channel.permissions_for(guild.me)
         if not perms.view_channel or not perms.read_message_history:
             continue
+
         try:
-            async for message in channel.history(limit=50):
+            async for message in channel.history(limit=500):
                 if message.author.id != client.user.id:
                     continue
+
                 match = CONFIG_RE.search(message.content or "")
                 if not match:
                     continue
-                data = json.loads(match.group(1))
-                intro_config.update({
-                    "voice_channel_id": int(data["voice_channel_id"]) if data.get("voice_channel_id") else None,
-                    "role_id": int(data["role_id"]) if data.get("role_id") else None,
-                    "remove_role_id": int(data["remove_role_id"]) if data.get("remove_role_id") else None,
-                    "join_role_id": int(data["join_role_id"]) if data.get("join_role_id") else None,
-                    "message_channel_id": channel.id,
-                    "message_id": message.id,
-                })
-                print(f"Loaded intro config: {config_payload()}", flush=True)
-                return
+
+                try:
+                    data = json.loads(match.group(1))
+                except Exception:
+                    continue
+
+                if newest is None or message.created_at > newest["created_at"]:
+                    newest = {
+                        "created_at": message.created_at,
+                        "channel_id": channel.id,
+                        "message_id": message.id,
+                        "data": data,
+                    }
+
+                # History is newest-first, so the first config in this channel is enough.
+                break
+
         except Exception as exc:
             print(f"CONFIG_SCAN_ERROR channel={channel.id}: {exc!r}", flush=True)
+
+    if newest is None:
+        print("No saved intro config found; using defaults", flush=True)
+        return
+
+    data = newest["data"]
+    intro_config.update({
+        "voice_channel_id": int(data["voice_channel_id"]) if data.get("voice_channel_id") else DEFAULT_INTRO_VOICE_CHANNEL_ID,
+        "role_id": int(data["role_id"]) if data.get("role_id") else None,
+        "remove_role_id": int(data["remove_role_id"]) if data.get("remove_role_id") else None,
+        "join_role_id": int(data["join_role_id"]) if data.get("join_role_id") else None,
+        "message_channel_id": newest["channel_id"],
+        "message_id": newest["message_id"],
+    })
+    print(f"Loaded saved intro config: {config_payload()}", flush=True)
 
 
 async def save_config(interaction: discord.Interaction):
