@@ -123,6 +123,13 @@ async function speakIntroInVoice(guild, preferredChannel = null) {
     adapterCreator: guild.voiceAdapterCreator,
     selfDeaf: true,
     selfMute: false,
+    daveEncryption: false,
+    debug: true,
+  })
+
+  connection.on('debug', message => console.log('[VOICE]', message))
+  connection.on('stateChange', (oldState, newState) => {
+    console.log('[VOICE STATE]', oldState.status, '->', newState.status)
   })
 
   try {
