@@ -31,7 +31,7 @@ intents.guilds = True
 intents.voice_states = True
 intents.members = True
 
-intro_config = {"voice_channel_id": DEFAULT_INTRO_VOICE_CHANNEL_ID, "role_id": None, "remove_role_id": None, "join_role_id": None, "ticket_category_id": None, "ticket_staff_role_id": None, "ticket_log_channel_id": None, "message_channel_id": None, "message_id": None}
+intro_config = {"voice_channel_id": DEFAULT_INTRO_VOICE_CHANNEL_ID, "role_id": None, "remove_role_id": None, "join_role_id": None, "ticket_category_id": None, "ticket_staff_role_id": None, "ticket_log_channel_id": None, "staff_review_channel_id": None, "staff_accept_role_id": None, "message_channel_id": None, "message_id": None}
 intro_queue = asyncio.Queue()
 audio_lock = asyncio.Lock()
 queue_task = None
@@ -44,6 +44,8 @@ class VoiceBot(commands.Bot):
         try:
             self.add_view(TicketPanelView())
             self.add_view(TicketControlsView())
+            self.add_view(StaffApplicationPanelView())
+            self.add_view(StaffApplicationReviewView())
             await self.tree.sync(guild=guild_obj)
             print("Voice worker slash commands synced", flush=True)
         except Exception as exc:
@@ -62,6 +64,8 @@ def config_payload():
         "ticket_category_id": intro_config.get("ticket_category_id"),
         "ticket_staff_role_id": intro_config.get("ticket_staff_role_id"),
         "ticket_log_channel_id": intro_config.get("ticket_log_channel_id"),
+        "staff_review_channel_id": intro_config.get("staff_review_channel_id"),
+        "staff_accept_role_id": intro_config.get("staff_accept_role_id"),
     }
 
 
@@ -116,6 +120,8 @@ async def load_config(guild: discord.Guild):
         "ticket_category_id": int(data["ticket_category_id"]) if data.get("ticket_category_id") else None,
         "ticket_staff_role_id": int(data["ticket_staff_role_id"]) if data.get("ticket_staff_role_id") else None,
         "ticket_log_channel_id": int(data["ticket_log_channel_id"]) if data.get("ticket_log_channel_id") else None,
+        "staff_review_channel_id": int(data["staff_review_channel_id"]) if data.get("staff_review_channel_id") else None,
+        "staff_accept_role_id": int(data["staff_accept_role_id"]) if data.get("staff_accept_role_id") else None,
         "message_channel_id": newest["channel_id"],
         "message_id": newest["message_id"],
     })
@@ -579,6 +585,261 @@ async def serverstats_command(interaction: discord.Interaction):
     await interaction.response.send_message(
         f"**{guild.name}**\nMembers: **{guild.member_count}**\nChannels: **{len(guild.channels)}**\nRoles: **{len(guild.roles)}**"
     )
+
+
+
+def application_user_id_from_message(message: discord.Message):
+    if not message.embeds:
+        return None
+    footer = message.embeds[0].footer.text or ""
+    match = re.search(r"Applicant ID: (\\d+)", footer)
+    return int(match.group(1)) if match else None
+
+
+class StaffApplicationModal(discord.ui.Modal, title="Staff Application"):
+    age = discord.ui.TextInput(label="How old are you?", max_length=30)
+    timezone = discord.ui.TextInput(label="What is your timezone?", max_length=80)
+    experience = discord.ui.TextInput(
+        label="Previous staff/moderation experience",
+        style=discord.TextStyle.paragraph,
+        max_length=1000,
+    )
+    reason = discord.ui.TextInput(
+        label="Why do you want to be staff at Meta?",
+        style=discord.TextStyle.paragraph,
+        max_length=1000,
+    )
+    activity = discord.ui.TextInput(
+        label="How active can you be each week?",
+        style=discord.TextStyle.paragraph,
+        max_length=500,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        review_id = intro_config.get("staff_review_channel_id")
+        review_channel = interaction.guild.get_channel(review_id) if review_id else None
+        if not isinstance(review_channel, discord.TextChannel):
+            await interaction.response.send_message(
+                "Staff applications are not configured yet. Please contact an administrator.",
+                ephemeral=True,
+            )
+            return
+
+        # Prevent duplicate pending applications by scanning recent review messages.
+        try:
+            async for message in review_channel.history(limit=100):
+                if message.author.id != client.user.id or not message.embeds:
+                    continue
+                if application_user_id_from_message(message) == interaction.user.id:
+                    title = message.embeds[0].title or ""
+                    if "Staff Application" in title and "ACCEPTED" not in title and "DENIED" not in title:
+                        await interaction.response.send_message(
+                            "You already have a staff application waiting for review.",
+                            ephemeral=True,
+                        )
+                        return
+        except Exception:
+            pass
+
+        embed = discord.Embed(
+            title="📋 New Staff Application",
+            description=f"Application submitted by {interaction.user.mention}",
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(name="Age", value=str(self.age), inline=False)
+        embed.add_field(name="Timezone", value=str(self.timezone), inline=False)
+        embed.add_field(name="Previous experience", value=str(self.experience), inline=False)
+        embed.add_field(name="Why they want staff", value=str(self.reason), inline=False)
+        embed.add_field(name="Weekly activity", value=str(self.activity), inline=False)
+        embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        embed.set_footer(text=f"Applicant ID: {interaction.user.id}")
+
+        await review_channel.send(embed=embed, view=StaffApplicationReviewView())
+        await interaction.response.send_message(
+            "✅ Your staff application was submitted. Staff will review it privately.",
+            ephemeral=True,
+        )
+
+
+class StaffApplicationPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Apply for Staff",
+        emoji="📝",
+        style=discord.ButtonStyle.primary,
+        custom_id="meta_staff_apply",
+    )
+    async def apply(self, interaction: discord.Interaction, button: discord.ui.Button):
+        accept_role_id = intro_config.get("staff_accept_role_id")
+        member = interaction.user if isinstance(interaction.user, discord.Member) else None
+        if accept_role_id and member and any(r.id == accept_role_id for r in member.roles):
+            await interaction.response.send_message("You already have the configured staff role.", ephemeral=True)
+            return
+        await interaction.response.send_modal(StaffApplicationModal())
+
+
+class StaffApplicationReviewView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def staff_allowed(self, interaction: discord.Interaction):
+        member = interaction.user if isinstance(interaction.user, discord.Member) else None
+        if not member:
+            return False
+        ticket_staff_id = intro_config.get("ticket_staff_role_id")
+        return member.guild_permissions.manage_guild or (
+            ticket_staff_id and any(r.id == ticket_staff_id for r in member.roles)
+        )
+
+    @discord.ui.button(
+        label="Accept",
+        emoji="✅",
+        style=discord.ButtonStyle.success,
+        custom_id="meta_staff_accept",
+    )
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self.staff_allowed(interaction):
+            await interaction.response.send_message("Only staff can review applications.", ephemeral=True)
+            return
+
+        applicant_id = application_user_id_from_message(interaction.message)
+        if not applicant_id:
+            await interaction.response.send_message("I couldn't identify this applicant.", ephemeral=True)
+            return
+
+        try:
+            applicant = interaction.guild.get_member(applicant_id) or await interaction.guild.fetch_member(applicant_id)
+        except Exception:
+            applicant = None
+
+        role_id = intro_config.get("staff_accept_role_id")
+        role = interaction.guild.get_role(role_id) if role_id else None
+        if applicant and role:
+            try:
+                await applicant.add_roles(role, reason=f"Staff application accepted by {interaction.user}")
+            except Exception as exc:
+                await interaction.response.send_message(
+                    f"I couldn't give the staff role: {exc}",
+                    ephemeral=True,
+                )
+                return
+
+        embed = interaction.message.embeds[0].copy()
+        embed.title = "✅ Staff Application — ACCEPTED"
+        embed.color = discord.Color.green()
+        embed.add_field(name="Reviewed by", value=interaction.user.mention, inline=False)
+
+        for item in self.children:
+            item.disabled = True
+
+        await interaction.response.edit_message(embed=embed, view=self)
+
+        if applicant:
+            try:
+                await applicant.send(
+                    f"✅ Your staff application for **{interaction.guild.name}** was accepted."
+                )
+            except Exception:
+                pass
+
+    @discord.ui.button(
+        label="Deny",
+        emoji="❌",
+        style=discord.ButtonStyle.danger,
+        custom_id="meta_staff_deny",
+    )
+    async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self.staff_allowed(interaction):
+            await interaction.response.send_message("Only staff can review applications.", ephemeral=True)
+            return
+
+        applicant_id = application_user_id_from_message(interaction.message)
+        if not applicant_id:
+            await interaction.response.send_message("I couldn't identify this applicant.", ephemeral=True)
+            return
+
+        embed = interaction.message.embeds[0].copy()
+        embed.title = "❌ Staff Application — DENIED"
+        embed.color = discord.Color.red()
+        embed.add_field(name="Reviewed by", value=interaction.user.mention, inline=False)
+
+        for item in self.children:
+            item.disabled = True
+
+        await interaction.response.edit_message(embed=embed, view=self)
+
+        try:
+            applicant = interaction.guild.get_member(applicant_id) or await interaction.guild.fetch_member(applicant_id)
+            await applicant.send(
+                f"Your staff application for **{interaction.guild.name}** was not accepted this time."
+            )
+        except Exception:
+            pass
+
+
+@client.tree.command(name="staffconfig", description="Configure staff application reviews and accepted role")
+@app_commands.describe(
+    review_channel="Private channel where staff applications are sent",
+    accepted_role="Role given when an application is accepted",
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def staffconfig_command(
+    interaction: discord.Interaction,
+    review_channel: discord.TextChannel,
+    accepted_role: discord.Role,
+):
+    if accepted_role >= interaction.guild.me.top_role:
+        await interaction.response.send_message(
+            "I can't give that role because it is at or above my highest role. Move it below **Meta Support**.",
+            ephemeral=True,
+        )
+        return
+
+    intro_config["staff_review_channel_id"] = review_channel.id
+    intro_config["staff_accept_role_id"] = accepted_role.id
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        await save_config(interaction)
+        await interaction.followup.send(
+            f"Staff applications saved. Reviews go to {review_channel.mention}, and accepted applicants receive **{accepted_role.name}**.",
+            ephemeral=True,
+        )
+    except Exception as exc:
+        await interaction.followup.send(f"I couldn't save the staff application setup: {exc}", ephemeral=True)
+
+
+@client.tree.command(name="staffpanel", description="Post the staff application panel")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def staffpanel_command(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="📝 Staff Applications",
+        description=(
+            "Interested in helping the Meta community? Apply to join the staff team below.\n\n"
+            "Please answer every question carefully and truthfully. Submitting an application "
+            "does not guarantee acceptance."
+        ),
+        color=discord.Color.blurple(),
+    )
+    embed.add_field(
+        name="Before applying",
+        value=(
+            "• Be respectful and mature\n"
+            "• Be active in the community\n"
+            "• Be willing to help members\n"
+            "• Do not repeatedly ask staff for an application result"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="Meta Staff Team • Applications are reviewed privately")
+
+    await interaction.channel.send(embed=embed, view=StaffApplicationPanelView())
+    await interaction.response.send_message("Staff application panel posted.", ephemeral=True)
 
 
 @client.tree.command(name="intro", description="Play the Meta voice intro")
