@@ -43,7 +43,7 @@ async def play_intro(channel_id: int):
     elif not voice:
         voice = await channel.connect(timeout=20, reconnect=False)
 
-    text = "Welcome to Meta. Meta Support is online. Use slash help to see everything I can do."
+    text = "Welcome to Meta. Meta is a coding learning website where you can learn programming, practice with guided lessons and hints, build projects, track your progress, and use an AI coach to help you improve. You can learn web development, game development, Minecraft modding, and more."
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
         path = tmp.name
 
