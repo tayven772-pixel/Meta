@@ -3,6 +3,8 @@ import asyncio
 import tempfile
 from aiohttp import web
 import discord
+from discord import app_commands
+from discord.ext import commands
 from gtts import gTTS
 import imageio_ffmpeg
 
@@ -14,7 +16,17 @@ PORT = int(os.environ.get("PORT", "10000"))
 intents = discord.Intents.none()
 intents.guilds = True
 intents.voice_states = True
-client = discord.Client(intents=intents)
+class VoiceBot(commands.Bot):
+    async def setup_hook(self):
+        guild_obj = discord.Object(id=GUILD_ID)
+        try:
+            self.tree.copy_global_to(guild=guild_obj)
+            await self.tree.sync(guild=guild_obj)
+            print("Voice worker slash commands synced", flush=True)
+        except Exception as exc:
+            print("VOICE_COMMAND_SYNC_ERROR", repr(exc), flush=True)
+
+client = VoiceBot(command_prefix="!", intents=intents)
 
 async def play_intro(channel_id: int):
     guild = client.get_guild(GUILD_ID)
@@ -91,6 +103,31 @@ async def start_http():
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
     print(f"Voice worker health server listening on {PORT}", flush=True)
+
+@client.tree.command(name="intro", description="Play the Meta voice intro")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def intro_command(interaction: discord.Interaction):
+    if interaction.guild is None or interaction.guild.id != GUILD_ID:
+        await interaction.response.send_message("This command only works in the Meta server.", ephemeral=True)
+        return
+
+    member = interaction.user if isinstance(interaction.user, discord.Member) else None
+    voice_channel = member.voice.channel if member and member.voice and member.voice.channel else None
+
+    if not isinstance(voice_channel, discord.VoiceChannel):
+        await interaction.response.send_message(
+            "Join a voice channel first, then run /intro again.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        await play_intro(voice_channel.id)
+        await interaction.followup.send("Voice intro played.", ephemeral=True)
+    except Exception as exc:
+        print("INTRO_COMMAND_ERROR", repr(exc), flush=True)
+        await interaction.followup.send(f"I could not play the voice intro: {exc}", ephemeral=True)
 
 @client.event
 async def on_ready():
