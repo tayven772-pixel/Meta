@@ -3,6 +3,7 @@ import re
 import json
 import asyncio
 import tempfile
+import io
 from aiohttp import web
 import discord
 from discord import app_commands
@@ -30,7 +31,7 @@ intents.guilds = True
 intents.voice_states = True
 intents.members = True
 
-intro_config = {"voice_channel_id": DEFAULT_INTRO_VOICE_CHANNEL_ID, "role_id": None, "remove_role_id": None, "join_role_id": None, "message_channel_id": None, "message_id": None}
+intro_config = {"voice_channel_id": DEFAULT_INTRO_VOICE_CHANNEL_ID, "role_id": None, "remove_role_id": None, "join_role_id": None, "ticket_category_id": None, "ticket_staff_role_id": None, "ticket_log_channel_id": None, "message_channel_id": None, "message_id": None}
 intro_queue = asyncio.Queue()
 audio_lock = asyncio.Lock()
 queue_task = None
@@ -41,6 +42,8 @@ class VoiceBot(commands.Bot):
     async def setup_hook(self):
         guild_obj = discord.Object(id=GUILD_ID)
         try:
+            self.add_view(TicketPanelView())
+            self.add_view(TicketControlsView())
             await self.tree.sync(guild=guild_obj)
             print("Voice worker slash commands synced", flush=True)
         except Exception as exc:
@@ -56,6 +59,9 @@ def config_payload():
         "role_id": intro_config["role_id"],
         "remove_role_id": intro_config["remove_role_id"],
         "join_role_id": intro_config["join_role_id"],
+        "ticket_category_id": intro_config.get("ticket_category_id"),
+        "ticket_staff_role_id": intro_config.get("ticket_staff_role_id"),
+        "ticket_log_channel_id": intro_config.get("ticket_log_channel_id"),
     }
 
 
@@ -107,6 +113,9 @@ async def load_config(guild: discord.Guild):
         "role_id": int(data["role_id"]) if data.get("role_id") else None,
         "remove_role_id": int(data["remove_role_id"]) if data.get("remove_role_id") else None,
         "join_role_id": int(data["join_role_id"]) if data.get("join_role_id") else None,
+        "ticket_category_id": int(data["ticket_category_id"]) if data.get("ticket_category_id") else None,
+        "ticket_staff_role_id": int(data["ticket_staff_role_id"]) if data.get("ticket_staff_role_id") else None,
+        "ticket_log_channel_id": int(data["ticket_log_channel_id"]) if data.get("ticket_log_channel_id") else None,
         "message_channel_id": newest["channel_id"],
         "message_id": newest["message_id"],
     })
@@ -318,6 +327,258 @@ async def start_http():
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
     print(f"Voice worker health server listening on {PORT}", flush=True)
+
+
+
+def safe_ticket_name(value: str):
+    cleaned = re.sub(r"[^a-z0-9-]", "-", value.lower())
+    cleaned = re.sub(r"-+", "-", cleaned).strip("-")
+    return cleaned[:70] or "member"
+
+
+async def create_ticket_channel(interaction: discord.Interaction, ticket_type: str, title: str, fields: list[tuple[str, str]]):
+    guild = interaction.guild
+    if guild is None:
+        return
+
+    category = guild.get_channel(intro_config.get("ticket_category_id")) if intro_config.get("ticket_category_id") else None
+    if not isinstance(category, discord.CategoryChannel):
+        category = interaction.channel.category if isinstance(interaction.channel, discord.TextChannel) else None
+
+    staff_role = guild.get_role(intro_config.get("ticket_staff_role_id")) if intro_config.get("ticket_staff_role_id") else None
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True, read_message_history=True),
+    }
+    if staff_role:
+        overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_messages=True)
+
+    existing = discord.utils.find(
+        lambda ch: isinstance(ch, discord.TextChannel) and ch.topic and f"ticket-owner:{interaction.user.id}" in ch.topic,
+        guild.text_channels
+    )
+    if existing:
+        await interaction.response.send_message(f"You already have an open ticket: {existing.mention}", ephemeral=True)
+        return
+
+    channel = await guild.create_text_channel(
+        name=f"{ticket_type}-{safe_ticket_name(interaction.user.display_name)}",
+        category=category,
+        overwrites=overwrites,
+        topic=f"ticket-owner:{interaction.user.id} type:{ticket_type}",
+        reason=f"Meta Support ticket created by {interaction.user}",
+    )
+
+    embed = discord.Embed(
+        title=title,
+        description=f"Ticket opened by {interaction.user.mention}. A staff member will help you here.",
+        color=discord.Color.blurple(),
+    )
+    for name, value in fields:
+        embed.add_field(name=name, value=value or "Not provided", inline=False)
+    embed.set_footer(text="Meta Support • Use the buttons below to manage this ticket")
+
+    await channel.send(
+        content=(staff_role.mention if staff_role else None),
+        embed=embed,
+        view=TicketControlsView(),
+        allowed_mentions=discord.AllowedMentions(roles=True, users=False),
+    )
+    await interaction.response.send_message(f"Your ticket was created: {channel.mention}", ephemeral=True)
+
+
+class GeneralSupportModal(discord.ui.Modal, title="General Support"):
+    issue = discord.ui.TextInput(label="What do you need help with?", style=discord.TextStyle.paragraph, max_length=1000)
+    extra = discord.ui.TextInput(label="Additional information", style=discord.TextStyle.paragraph, required=False, max_length=1000)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await create_ticket_channel(interaction, "support", "General Support", [
+            ("Issue", str(self.issue)),
+            ("Additional information", str(self.extra)),
+        ])
+
+
+class ReportMemberModal(discord.ui.Modal, title="Report a Member"):
+    member = discord.ui.TextInput(label="Member username or ID", max_length=100)
+    reason = discord.ui.TextInput(label="What happened?", style=discord.TextStyle.paragraph, max_length=1000)
+    evidence = discord.ui.TextInput(label="Evidence / links", style=discord.TextStyle.paragraph, required=False, max_length=1000)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await create_ticket_channel(interaction, "report", "Report a Member", [
+            ("Member", str(self.member)),
+            ("Report", str(self.reason)),
+            ("Evidence", str(self.evidence)),
+        ])
+
+
+class PartnershipModal(discord.ui.Modal, title="Partnership"):
+    community = discord.ui.TextInput(label="Server/community name", max_length=100)
+    invite = discord.ui.TextInput(label="Invite or community link", max_length=300)
+    members = discord.ui.TextInput(label="Member count / community size", max_length=100)
+    partnership = discord.ui.TextInput(label="What kind of partnership are you looking for?", style=discord.TextStyle.paragraph, max_length=1000)
+    extra = discord.ui.TextInput(label="Additional information", style=discord.TextStyle.paragraph, required=False, max_length=1000)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await create_ticket_channel(interaction, "partnership", "Partnership", [
+            ("Server/community name", str(self.community)),
+            ("Invite or community link", str(self.invite)),
+            ("Member count / community size", str(self.members)),
+            ("Partnership request", str(self.partnership)),
+            ("Additional information", str(self.extra)),
+        ])
+
+
+class TicketPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="General Support", emoji="🛟", style=discord.ButtonStyle.primary, custom_id="meta_ticket_general")
+    async def general(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(GeneralSupportModal())
+
+    @discord.ui.button(label="Report a Member", emoji="🛡️", style=discord.ButtonStyle.danger, custom_id="meta_ticket_report")
+    async def report(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ReportMemberModal())
+
+    @discord.ui.button(label="Partnership", emoji="🤝", style=discord.ButtonStyle.secondary, custom_id="meta_ticket_partnership")
+    async def partnership(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(PartnershipModal())
+
+
+async def ticket_transcript(channel: discord.TextChannel):
+    lines = []
+    async for message in channel.history(limit=None, oldest_first=True):
+        created = message.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+        content = message.content or ""
+        if message.attachments:
+            content += " " + " ".join(a.url for a in message.attachments)
+        lines.append(f"[{created}] {message.author} ({message.author.id}): {content}")
+    return "\n".join(lines) or "No messages."
+
+
+class TicketControlsView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Claim", emoji="🙋", style=discord.ButtonStyle.success, custom_id="meta_ticket_claim")
+    async def claim(self, interaction: discord.Interaction, button: discord.ui.Button):
+        staff_role_id = intro_config.get("ticket_staff_role_id")
+        member = interaction.user if isinstance(interaction.user, discord.Member) else None
+        if staff_role_id and member and all(r.id != staff_role_id for r in member.roles) and not member.guild_permissions.manage_channels:
+            await interaction.response.send_message("Only support staff can claim tickets.", ephemeral=True)
+            return
+        await interaction.response.send_message(f"✅ {interaction.user.mention} claimed this ticket.")
+
+    @discord.ui.button(label="Close", emoji="🔒", style=discord.ButtonStyle.danger, custom_id="meta_ticket_close")
+    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel) or not channel.topic or "ticket-owner:" not in channel.topic:
+            await interaction.response.send_message("This is not a ticket channel.", ephemeral=True)
+            return
+
+        owner_match = re.search(r"ticket-owner:(\d+)", channel.topic)
+        owner_id = int(owner_match.group(1)) if owner_match else None
+        member = interaction.user if isinstance(interaction.user, discord.Member) else None
+        is_owner = owner_id == interaction.user.id
+        is_staff = bool(member and (member.guild_permissions.manage_channels or (
+            intro_config.get("ticket_staff_role_id") and any(r.id == intro_config["ticket_staff_role_id"] for r in member.roles)
+        )))
+        if not (is_owner or is_staff):
+            await interaction.response.send_message("Only the ticket owner or support staff can close this ticket.", ephemeral=True)
+            return
+
+        await interaction.response.send_message("Closing ticket and saving transcript…", ephemeral=True)
+        transcript = await ticket_transcript(channel)
+        log_channel = interaction.guild.get_channel(intro_config.get("ticket_log_channel_id")) if intro_config.get("ticket_log_channel_id") else None
+        if isinstance(log_channel, discord.TextChannel):
+            data = io.BytesIO(transcript.encode("utf-8"))
+            await log_channel.send(
+                content=f"Transcript for **#{channel.name}** closed by {interaction.user.mention}",
+                file=discord.File(data, filename=f"{channel.name}-transcript.txt"),
+            )
+        await asyncio.sleep(2)
+        await channel.delete(reason=f"Ticket closed by {interaction.user}")
+
+
+@client.tree.command(name="ticketconfig", description="Configure the Meta ticket system")
+@app_commands.describe(
+    category="Category where ticket channels should be created",
+    staff_role="Role allowed to view and manage tickets",
+    log_channel="Channel where closed-ticket transcripts are sent",
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def ticketconfig_command(
+    interaction: discord.Interaction,
+    category: discord.CategoryChannel,
+    staff_role: discord.Role,
+    log_channel: discord.TextChannel,
+):
+    intro_config["ticket_category_id"] = category.id
+    intro_config["ticket_staff_role_id"] = staff_role.id
+    intro_config["ticket_log_channel_id"] = log_channel.id
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        await save_config(interaction)
+        await interaction.followup.send(
+            f"Ticket system saved. Tickets go in **{category.name}**, staff role is **{staff_role.name}**, and transcripts go to {log_channel.mention}.",
+            ephemeral=True,
+        )
+    except Exception as exc:
+        await interaction.followup.send(f"I couldn't save the ticket setup: {exc}", ephemeral=True)
+
+
+@client.tree.command(name="ticketpanel", description="Post the Community Support ticket panel")
+@app_commands.checks.has_permissions(manage_guild=True)
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def ticketpanel_command(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="💠 Community Support",
+        description="Welcome to Meta community support. Choose the option that best matches what you need so the right staff members can help you privately.",
+        color=discord.Color.gold(),
+    )
+    embed.add_field(
+        name="🛟 General Support",
+        value="Questions, server help, access issues, or anything that does not fit another category.",
+        inline=False,
+    )
+    embed.add_field(
+        name="🛡️ Report a Member",
+        value="Privately report behavior that may break community rules. Include evidence whenever possible.",
+        inline=False,
+    )
+    embed.add_field(
+        name="🤝 Partnership",
+        value="Propose a collaboration between Meta and another server, group, or community project.",
+        inline=False,
+    )
+    embed.set_footer(text="Please choose one category and include as much detail as possible.")
+    await interaction.channel.send(embed=embed, view=TicketPanelView())
+    await interaction.response.send_message("Community Support panel posted.", ephemeral=True)
+
+
+@client.tree.command(name="help", description="Show Meta Support commands")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def help_command(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        "**Meta Support**\n"
+        "/intro — play the website intro\n"
+        "/introconfig — configure the intro VC and roles\n"
+        "/ticketpanel — post the support ticket panel\n"
+        "/ticketconfig — configure ticket category, staff role, and transcript log\n"
+        "/serverstats — show live server stats",
+        ephemeral=True,
+    )
+
+
+@client.tree.command(name="serverstats", description="Show live server stats")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def serverstats_command(interaction: discord.Interaction):
+    guild = interaction.guild
+    await interaction.response.send_message(
+        f"**{guild.name}**\nMembers: **{guild.member_count}**\nChannels: **{len(guild.channels)}**\nRoles: **{len(guild.roles)}**"
+    )
 
 
 @client.tree.command(name="intro", description="Play the Meta voice intro")
