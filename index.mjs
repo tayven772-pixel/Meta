@@ -1,5 +1,9 @@
 import http from 'node:http'
+import { spawn } from 'node:child_process'
 import { Client, GatewayIntentBits, ChannelType, PermissionFlagsBits } from 'discord.js'
+import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, StreamType, entersState, NoSubscriberBehavior } from '@discordjs/voice'
+import googleTTS from 'google-tts-api'
+import ffmpegPath from 'ffmpeg-static'
 
 const TOKEN = process.env.DISCORD_BOT_TOKEN
 const GUILD_ID = process.env.DISCORD_GUILD_ID || '1554300458409922590'
@@ -82,7 +86,6 @@ function introPayload(userId, guildName) {
     content: userId
       ? `Welcome <@${userId}> to **${guildName}**! Welcome to Meta. Use /help to see everything I can do.`
       : `Welcome to **${guildName}**! Meta Support is online.`,
-    tts: true,
     embeds: [{
       title: 'Welcome to Meta',
       description: 'Meta Support is active here. Use /help to see commands, /invites for invite stats, /daily for coins, and /leaderboard for rankings.',
@@ -93,10 +96,81 @@ function introPayload(userId, guildName) {
   }
 }
 
+async function pickIntroVoiceChannel(guild, preferredChannel = null) {
+  if (preferredChannel?.type === ChannelType.GuildVoice) return preferredChannel
+
+  if (process.env.INTRO_VOICE_CHANNEL_ID) {
+    const configured = guild.channels.cache.get(process.env.INTRO_VOICE_CHANNEL_ID)
+    if (configured?.type === ChannelType.GuildVoice) return configured
+  }
+
+  const me = guild.members.me
+  return guild.channels.cache.find(channel =>
+    channel.type === ChannelType.GuildVoice &&
+    me &&
+    channel.permissionsFor(me)?.has(PermissionFlagsBits.Connect) &&
+    channel.permissionsFor(me)?.has(PermissionFlagsBits.Speak)
+  ) ?? null
+}
+
+async function speakIntroInVoice(guild, preferredChannel = null) {
+  const voiceChannel = await pickIntroVoiceChannel(guild, preferredChannel)
+  if (!voiceChannel) throw new Error('No voice channel available for the intro')
+
+  const connection = joinVoiceChannel({
+    channelId: voiceChannel.id,
+    guildId: guild.id,
+    adapterCreator: guild.voiceAdapterCreator,
+    selfDeaf: true,
+    selfMute: false,
+  })
+
+  try {
+    await entersState(connection, VoiceConnectionStatus.Ready, 15_000)
+
+    const speech = 'Welcome to Meta. Meta Support is online. Use slash help to see everything I can do.'
+    const url = googleTTS.getAudioUrl(speech, { lang: 'en', slow: false, host: 'https://translate.google.com' })
+
+    if (!ffmpegPath) throw new Error('FFmpeg is unavailable')
+    const ffmpeg = spawn(ffmpegPath, [
+      '-loglevel', 'error',
+      '-i', url,
+      '-f', 's16le',
+      '-ar', '48000',
+      '-ac', '2',
+      'pipe:1',
+    ], { stdio: ['ignore', 'pipe', 'pipe'] })
+
+    let ffmpegError = ''
+    ffmpeg.stderr.on('data', chunk => { ffmpegError += chunk.toString() })
+
+    const player = createAudioPlayer({
+      behaviors: { noSubscriber: NoSubscriberBehavior.Play },
+    })
+    const resource = createAudioResource(ffmpeg.stdout, { inputType: StreamType.Raw })
+    connection.subscribe(player)
+
+    const finished = new Promise((resolve, reject) => {
+      player.once(AudioPlayerStatus.Idle, resolve)
+      player.once('error', reject)
+      ffmpeg.once('error', reject)
+      ffmpeg.once('close', code => {
+        if (code && code !== 0) reject(new Error('FFmpeg exited with code ' + code + ': ' + ffmpegError.slice(-300)))
+      })
+    })
+
+    player.play(resource)
+    await finished
+    console.log('Voice intro played in channel=' + voiceChannel.id)
+  } finally {
+    connection.destroy()
+  }
+}
+
 async function sendIntro(member) {
   const channel = await pickIntroChannel(member.guild)
-  if (!channel) return
-  await channel.send(introPayload(member.id, member.guild.name))
+  if (channel) await channel.send(introPayload(member.id, member.guild.name))
+  await speakIntroInVoice(member.guild).catch(error => console.error('Automatic voice intro failed:', error))
 }
 
 async function configureDiscordApp() {
@@ -157,7 +231,16 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (interaction.commandName === 'intro') {
-      await interaction.reply(introPayload(null, interaction.guild.name))
+      const member = interaction.member
+      const preferred = member?.voice?.channel ?? null
+      await interaction.deferReply()
+      try {
+        await speakIntroInVoice(interaction.guild, preferred)
+        await interaction.editReply({ content: preferred ? `Played the intro in **${preferred.name}**.` : 'Played the intro in the configured voice channel.' })
+      } catch (error) {
+        console.error('Manual voice intro failed:', error)
+        await interaction.editReply({ content: 'I could not play the voice intro. Join a voice channel first, or configure an intro voice channel.' })
+      }
       return
     }
 
