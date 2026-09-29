@@ -28,8 +28,9 @@ CONFIG_RE = re.compile(r"\\[META_INTRO_CONFIG\\]\\s+(\\{.*\\})")
 intents = discord.Intents.none()
 intents.guilds = True
 intents.voice_states = True
+intents.members = True
 
-intro_config = {"voice_channel_id": DEFAULT_INTRO_VOICE_CHANNEL_ID, "role_id": None, "remove_role_id": None, "message_channel_id": None, "message_id": None}
+intro_config = {"voice_channel_id": DEFAULT_INTRO_VOICE_CHANNEL_ID, "role_id": None, "remove_role_id": None, "join_role_id": None, "message_channel_id": None, "message_id": None}
 intro_queue = asyncio.Queue()
 audio_lock = asyncio.Lock()
 queue_task = None
@@ -54,6 +55,7 @@ def config_payload():
         "voice_channel_id": intro_config["voice_channel_id"],
         "role_id": intro_config["role_id"],
         "remove_role_id": intro_config["remove_role_id"],
+        "join_role_id": intro_config["join_role_id"],
     }
 
 
@@ -75,6 +77,7 @@ async def load_config(guild: discord.Guild):
                     "voice_channel_id": int(data["voice_channel_id"]) if data.get("voice_channel_id") else None,
                     "role_id": int(data["role_id"]) if data.get("role_id") else None,
                     "remove_role_id": int(data["remove_role_id"]) if data.get("remove_role_id") else None,
+                    "join_role_id": int(data["join_role_id"]) if data.get("join_role_id") else None,
                     "message_channel_id": channel.id,
                     "message_id": message.id,
                 })
@@ -256,6 +259,7 @@ async def health(request):
         "voiceChannelId": str(voice.channel.id) if voice and voice.is_connected() else None,
         "configuredRoleId": str(intro_config["role_id"]) if intro_config["role_id"] else None,
         "configuredRemoveRoleId": str(intro_config["remove_role_id"]) if intro_config["remove_role_id"] else None,
+        "configuredJoinRoleId": str(intro_config["join_role_id"]) if intro_config["join_role_id"] else None,
     })
 
 
@@ -313,11 +317,12 @@ async def intro_command(interaction: discord.Interaction):
         await interaction.followup.send(f"I could not play the voice intro: {exc}", ephemeral=True)
 
 
-@client.tree.command(name="introconfig", description="Set the intro VC, role to give, and optional role to remove")
+@client.tree.command(name="introconfig", description="Configure intro VC and server join/completion roles")
 @app_commands.describe(
     voice_channel="Voice channel Meta Support should stay in",
     role="Role given after a member stays for the full intro",
     remove_role="Optional role removed after a member finishes the intro",
+    join_role="Optional role automatically given when someone joins the server",
 )
 @app_commands.checks.has_permissions(manage_guild=True)
 @app_commands.guilds(discord.Object(id=GUILD_ID))
@@ -326,6 +331,7 @@ async def introconfig_command(
     voice_channel: discord.VoiceChannel,
     role: discord.Role,
     remove_role: discord.Role | None = None,
+    join_role: discord.Role | None = None,
 ):
     await interaction.response.defer(ephemeral=True, thinking=True)
 
@@ -344,16 +350,25 @@ async def introconfig_command(
         )
         return
 
+    if join_role and join_role >= me.top_role:
+        await interaction.followup.send(
+            "I can't give the join role because it is at or above my highest role. Move it below **Meta Support**.",
+            ephemeral=True,
+        )
+        return
+
     intro_config["voice_channel_id"] = voice_channel.id
     intro_config["role_id"] = role.id
     intro_config["remove_role_id"] = remove_role.id if remove_role else None
+    intro_config["join_role_id"] = join_role.id if join_role else None
 
     try:
         await save_config(interaction)
         await ensure_voice_connection(interaction.guild)
         remove_text = f" and remove **{remove_role.name}**" if remove_role else ""
+        join_text = f" New members will receive **{join_role.name}** when they join." if join_role else ""
         await interaction.followup.send(
-            f"Intro setup saved. I'll stay in **{voice_channel.name}**, give **{role.name}**{remove_text} after someone remains for the entire intro.",
+            f"Intro setup saved. I'll stay in **{voice_channel.name}**, give **{role.name}**{remove_text} after someone remains for the entire intro.{join_text}",
             ephemeral=True,
         )
     except Exception as exc:
@@ -370,6 +385,28 @@ async def introconfig_error(interaction: discord.Interaction, error: app_command
             await interaction.response.send_message("You need **Manage Server** to change the intro setup.", ephemeral=True)
     else:
         print("INTRO_CONFIG_COMMAND_ERROR", repr(error), flush=True)
+
+
+
+@client.event
+async def on_member_join(member: discord.Member):
+    if member.guild.id != GUILD_ID or member.bot:
+        return
+
+    role_id = intro_config.get("join_role_id")
+    if not role_id:
+        return
+
+    role = member.guild.get_role(role_id)
+    if role is None:
+        print(f"Configured join role {role_id} no longer exists", flush=True)
+        return
+
+    try:
+        await member.add_roles(role, reason="Automatic Meta server join role")
+        print(f"Granted join role {role.name} to {member}", flush=True)
+    except Exception as exc:
+        print(f"JOIN_ROLE_ERROR member={member.id} role={role_id}: {exc!r}", flush=True)
 
 
 @client.event
