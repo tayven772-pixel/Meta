@@ -35,7 +35,8 @@ async function sendIntro(member) {
   if (!channel) return
 
   await channel.send({
-    content: `Welcome <@${member.id}> to **${member.guild.name}**!`,
+    content: `Welcome <@${member.id}> to **${member.guild.name}**! Welcome to Meta. Use slash help to see everything I can do.`,
+    tts: true,
     embeds: [{
       title: 'Welcome to Meta',
       description: 'Meta Support is active here. Use /help to see commands, /invites for invite stats, /daily for coins, and /leaderboard for rankings.',
