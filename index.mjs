@@ -126,6 +126,13 @@ client.once('clientReady', async () => {
   try {
     await configureDiscordApp()
     console.log('Guild commands registered directly on Render')
+    if (guild) {
+      const channel = await pickIntroChannel(guild)
+      if (channel) {
+        await channel.send(introPayload(null, guild.name))
+        console.log('ONE_SHOT_TTS_INTRO_SENT channel=' + channel.id)
+      }
+    }
   } catch (error) {
     console.error('Discord app setup failed:', error)
   }
