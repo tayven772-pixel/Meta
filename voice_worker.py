@@ -14,6 +14,7 @@ TOKEN = os.environ["DISCORD_BOT_TOKEN"]
 GUILD_ID = int(os.environ.get("DISCORD_GUILD_ID", "1554300458409922590"))
 SECRET = os.environ["VOICE_WORKER_SECRET"]
 PORT = int(os.environ.get("PORT", "10000"))
+DEFAULT_INTRO_VOICE_CHANNEL_ID = int(os.environ.get("INTRO_VOICE_CHANNEL_ID", "1554300458976411733"))
 
 INTRO_TEXT = (
     "Welcome to Meta. Meta is a coding learning website where you can learn programming, "
@@ -28,7 +29,7 @@ intents = discord.Intents.none()
 intents.guilds = True
 intents.voice_states = True
 
-intro_config = {"voice_channel_id": None, "role_id": None, "message_channel_id": None, "message_id": None}
+intro_config = {"voice_channel_id": DEFAULT_INTRO_VOICE_CHANNEL_ID, "role_id": None, "message_channel_id": None, "message_id": None}
 intro_queue = asyncio.Queue()
 audio_lock = asyncio.Lock()
 queue_task = None
