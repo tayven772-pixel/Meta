@@ -45,6 +45,7 @@ class VoiceBot(commands.Bot):
             self.add_view(TicketPanelView())
             self.add_view(TicketControlsView())
             self.add_view(StaffApplicationPanelView())
+            self.add_view(StaffApplicationDMView())
             self.add_view(StaffApplicationReviewView())
             await self.tree.sync(guild=guild_obj)
             print("Voice worker slash commands synced", flush=True)
@@ -616,8 +617,13 @@ class StaffApplicationModal(discord.ui.Modal, title="Staff Application"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        guild = client.get_guild(GUILD_ID)
+        if guild is None:
+            await interaction.response.send_message("The Meta server is unavailable right now.", ephemeral=True)
+            return
+
         review_id = intro_config.get("staff_review_channel_id")
-        review_channel = interaction.guild.get_channel(review_id) if review_id else None
+        review_channel = guild.get_channel(review_id) if review_id else None
         if not isinstance(review_channel, discord.TextChannel):
             await interaction.response.send_message(
                 "Staff applications are not configured yet. Please contact an administrator.",
@@ -662,6 +668,21 @@ class StaffApplicationModal(discord.ui.Modal, title="Staff Application"):
         )
 
 
+
+class StaffApplicationDMView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Start Staff Application",
+        emoji="📝",
+        style=discord.ButtonStyle.primary,
+        custom_id="meta_staff_dm_start",
+    )
+    async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(StaffApplicationModal())
+
+
 class StaffApplicationPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -678,7 +699,28 @@ class StaffApplicationPanelView(discord.ui.View):
         if accept_role_id and member and any(r.id == accept_role_id for r in member.roles):
             await interaction.response.send_message("You already have the configured staff role.", ephemeral=True)
             return
-        await interaction.response.send_modal(StaffApplicationModal())
+
+        dm_embed = discord.Embed(
+            title="📝 Meta Staff Application",
+            description=(
+                "Your application is private. Press the button below to begin. "
+                "Your answers will only be sent to the configured staff review channel."
+            ),
+            color=discord.Color.blurple(),
+        )
+        dm_embed.set_footer(text="Meta Staff Team")
+
+        try:
+            await interaction.user.send(embed=dm_embed, view=StaffApplicationDMView())
+            await interaction.response.send_message(
+                "📩 I sent the staff application to your DMs.",
+                ephemeral=True,
+            )
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "I couldn't DM you. Enable DMs from server members, then press **Apply for Staff** again.",
+                ephemeral=True,
+            )
 
 
 class StaffApplicationReviewView(discord.ui.View):
