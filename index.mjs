@@ -126,13 +126,6 @@ client.once('clientReady', async () => {
   try {
     await configureDiscordApp()
     console.log('Guild commands registered directly on Render')
-    if (guild) {
-      const channel = await pickIntroChannel(guild)
-      if (channel) {
-        await channel.send(introPayload(null, guild.name))
-        console.log('ONE_SHOT_TTS_INTRO_SENT channel=' + channel.id)
-      }
-    }
   } catch (error) {
     console.error('Discord app setup failed:', error)
   }
@@ -256,24 +249,7 @@ client.on('interactionCreate', async interaction => {
 
 client.on('error', error => console.error('Discord client error:', error))
 
-http.createServer(async (req, res) => {
-  if (req.url === '/test-intro') {
-    try {
-      const guild = client.guilds.cache.get(GUILD_ID)
-      if (!guild) throw new Error('Target guild not found')
-      const channel = await pickIntroChannel(guild)
-      if (!channel) throw new Error('No writable intro channel found')
-      await channel.send(introPayload(null, guild.name))
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, sent: true, channelId: channel.id }))
-    } catch (error) {
-      console.error('Test intro failed:', error)
-      res.writeHead(500, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : 'unknown error' }))
-    }
-    return
-  }
-
+http.createServer((req, res) => {
   res.writeHead(200, { 'content-type': 'application/json' })
   res.end(JSON.stringify({
     ok: true,
