@@ -214,8 +214,12 @@ async def grant_completion_role(guild: discord.Guild, member_id: int):
         if role not in member.roles:
             await member.add_roles(role, reason="Completed the full Meta voice intro")
             print(f"Granted intro role {role.name} to {member}", flush=True)
+
+        if member.voice and member.voice.channel and member.voice.channel.id == channel_id:
+            await member.move_to(None, reason="Completed the full Meta voice intro")
+            print(f"Disconnected {member} after intro completion", flush=True)
     except Exception as exc:
-        print(f"ROLE_UPDATE_ERROR member={member_id} give={role_id} remove={remove_role_id}: {exc!r}", flush=True)
+        print(f"ROLE_OR_DISCONNECT_ERROR member={member_id} give={role_id} remove={remove_role_id}: {exc!r}", flush=True)
 
 
 async def intro_queue_worker():
