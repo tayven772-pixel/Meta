@@ -16,6 +16,7 @@ GUILD_ID = int(os.environ.get("DISCORD_GUILD_ID", "1554300458409922590"))
 SECRET = os.environ["VOICE_WORKER_SECRET"]
 PORT = int(os.environ.get("PORT", "10000"))
 DEFAULT_INTRO_VOICE_CHANNEL_ID = int(os.environ.get("INTRO_VOICE_CHANNEL_ID", "1554300458976411733"))
+AI_ENDPOINT = os.environ.get("META_AI_ENDPOINT", "https://discord-bot-blond-beta.vercel.app/api/coach")
 
 INTRO_TEXT = (
     "Welcome to Meta. Meta is a coding learning website where you can learn programming, "
@@ -30,6 +31,7 @@ intents = discord.Intents.none()
 intents.guilds = True
 intents.voice_states = True
 intents.members = True
+intents.messages = True
 
 intro_config = {"voice_channel_id": DEFAULT_INTRO_VOICE_CHANNEL_ID, "role_id": None, "remove_role_id": None, "join_role_id": None, "ticket_category_id": None, "ticket_staff_role_id": None, "ticket_log_channel_id": None, "staff_review_channel_id": None, "staff_accept_role_id": None, "message_channel_id": None, "message_id": None}
 intro_queue = asyncio.Queue()
@@ -980,6 +982,86 @@ async def introconfig_error(interaction: discord.Interaction, error: app_command
     else:
         print("INTRO_CONFIG_COMMAND_ERROR", repr(error), flush=True)
 
+
+
+async def ask_meta_ai(message: discord.Message):
+    if not message.guild or message.guild.id != GUILD_ID:
+        return
+    if message.author.bot:
+        return
+
+    # Build a small amount of recent channel context so the AI understands the ticket/question.
+    context_lines = []
+    try:
+        async for item in message.channel.history(limit=12, before=message, oldest_first=True):
+            if item.author.bot and item.author.id != client.user.id:
+                continue
+            content = (item.clean_content or "").strip()
+            if content:
+                context_lines.append(f"{item.author.display_name}: {content[:700]}")
+    except Exception:
+        pass
+
+    prompt = (message.clean_content or "").strip()
+    if client.user:
+        prompt = re.sub(rf"@?{re.escape(client.user.display_name)}", "", prompt, flags=re.I).strip()
+
+    if not prompt:
+        prompt = "Help me with this conversation."
+
+    full_message = (
+        "Discord channel context:\n" +
+        ("\n".join(context_lines[-10:]) if context_lines else "(no earlier context)") +
+        f"\n\nCurrent member ({message.author.display_name}): {prompt}"
+    )
+
+    payload = {
+        "message": full_message,
+        "level": "Support",
+        "language": "English",
+        "track": "Discord Support",
+        "project": None,
+    }
+
+    try:
+        async with message.channel.typing():
+            timeout = aiohttp.ClientTimeout(total=45)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(AI_ENDPOINT, json=payload) as response:
+                    data = await response.json(content_type=None)
+                    if response.status != 200:
+                        raise RuntimeError(data.get("error") if isinstance(data, dict) else f"HTTP {response.status}")
+                    reply = str(data.get("reply", "")).strip() if isinstance(data, dict) else ""
+                    if not reply:
+                        raise RuntimeError("AI returned an empty reply")
+
+        # Discord messages are limited to 2000 characters.
+        if len(reply) <= 1900:
+            await message.reply(reply, mention_author=False)
+        else:
+            for index in range(0, len(reply), 1900):
+                chunk = reply[index:index + 1900]
+                if index == 0:
+                    await message.reply(chunk, mention_author=False)
+                else:
+                    await message.channel.send(chunk)
+        print(f"AI_REPLY_OK channel={message.channel.id} user={message.author.id}", flush=True)
+    except Exception as exc:
+        print(f"AI_REPLY_ERROR channel={getattr(message.channel, 'id', None)} user={message.author.id}: {exc!r}", flush=True)
+        try:
+            await message.reply("I couldn't reach Meta AI just now. Please try again in a moment.", mention_author=False)
+        except Exception:
+            pass
+
+
+@client.event
+async def on_message(message: discord.Message):
+    if message.author.bot or not message.guild or message.guild.id != GUILD_ID:
+        return
+
+    # Respond whenever a member directly mentions Meta Support.
+    if client.user and client.user in message.mentions:
+        await ask_meta_ai(message)
 
 
 @client.event
