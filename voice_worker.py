@@ -4,6 +4,7 @@ import json
 import asyncio
 import tempfile
 import io
+import aiohttp
 from aiohttp import web
 import discord
 from discord import app_commands
