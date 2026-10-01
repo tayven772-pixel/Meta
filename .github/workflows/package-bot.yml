@@ -1,0 +1,46 @@
+name: Package Meta Bot
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out bot source
+        uses: actions/checkout@v4
+
+      - name: Prepare clean bot folder
+        run: |
+          mkdir -p Meta-Bot-Files
+          rsync -a \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='Meta-Bot-Files' \
+            ./ Meta-Bot-Files/
+          cat > Meta-Bot-Files/SETUP.txt <<'EOF'
+          Meta Support Bot source bundle
+
+          Required environment variables:
+          - DISCORD_BOT_TOKEN
+          - DISCORD_GUILD_ID
+          - VOICE_WORKER_SECRET
+          - INTRO_VOICE_CHANNEL_ID (optional)
+          - META_AI_ENDPOINT (optional; defaults to the Meta Vercel AI endpoint)
+          - PORT (usually provided by the host)
+
+          Secret values are intentionally NOT included in this ZIP.
+          EOF
+
+      - name: Upload bot ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Meta-Bot-Files
+          path: Meta-Bot-Files/
+          include-hidden-files: true
+          retention-days: 7
