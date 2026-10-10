@@ -1,5 +1,6 @@
 package app.nexboost
 
+import android.app.Activity
 import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
@@ -7,6 +8,7 @@ import android.content.IntentFilter
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -41,6 +43,7 @@ class MainActivity : ComponentActivity() {
 fun NexBoostApp(context: Context) {
     var page by remember { mutableStateOf("Home") }
     var game by remember { mutableStateOf("Minecraft") }
+    var optimized by remember { mutableStateOf(false) }
     val prefs = remember { context.getSharedPreferences("nexboost", Context.MODE_PRIVATE) }
     val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
     val mem = ActivityManager.MemoryInfo().also { manager.getMemoryInfo(it) }
@@ -92,6 +95,25 @@ fun NexBoostApp(context: Context) {
                             }
                             Spacer(Modifier.height(10.dp)); Text("Memory values describe system memory at this moment, not RAM that NexBoost can free.", color = Muted, fontSize = 11.sp)
                         } } }
+                        item {
+                            Card(colors = CardDefaults.cardColors(containerColor = if (optimized) Color(0xFF1B3020) else Panel), shape = RoundedCornerShape(20.dp)) {
+                                Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    Text(if (optimized) "GAMING SESSION ACTIVE" else "ONE-TAP GAMING SETUP", color = Green, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                                    Text(if (optimized) "Keep-screen-on is enabled while NexBoost is open. Your game profile is ready." else "Apply NexBoost’s safe in-app setup before you play.", color = Muted, fontSize = 13.sp)
+                                    Button(onClick = {
+                                        optimized = !optimized
+                                        val activity = context as? Activity
+                                        if (optimized) activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                                        else activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                                    }, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = Green, contentColor = Ink)) {
+                                        Icon(if (optimized) Icons.Default.Stop else Icons.Default.Bolt, contentDescription = null)
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(if (optimized) "Stop gaming session" else "Auto-optimize", fontWeight = FontWeight.Bold)
+                                    }
+                                    Text("This safely keeps the screen awake in NexBoost. Android requires your permission for system-wide changes; no fake FPS or RAM-cleaning claims.", color = Muted, fontSize = 11.sp)
+                                }
+                            }
+                        }
                         item { Text("QUICK START", fontWeight = FontWeight.Bold, fontSize = 16.sp) }
                         item { ActionCard("Game-ready checklist", "Six practical changes you can apply safely", Icons.Default.CheckCircle, Green) { page = "Tools" } }
                         item { ActionCard("Choose a game profile", "Get tailored settings guidance", Icons.Default.SportsEsports, Green) { page = "Games" } }
