@@ -101,7 +101,7 @@ fun NexBoostApp(context: Context) {
                     "Games" -> {
                         item { Text("Game profiles", fontSize = 27.sp, fontWeight = FontWeight.Bold) }
                         item { Text("Pick a game for relevant in-game suggestions. Profiles do not change game settings automatically.", color = Muted) }
-                        item { Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) { listOf("Minecraft", "Roblox", "Other").forEach { g -> FilterChip(selected = game == g, onClick = { game = g }, label = { Text(g) }, leadingIcon = if (game == g) {{ Icon(Icons.Default.Check, null) }} else null) } } }
+                        item { Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) { listOf("Minecraft", "Roblox", "Other").forEach { g -> FilterChip(selected = game == g, onClick = { game = g }, label = { Text(g) }, leadingIcon = if (game == g) ({ Icon(Icons.Default.Check, null) }) else null) } } }
                         item { Card(colors = CardDefaults.cardColors(containerColor = Panel), shape = RoundedCornerShape(20.dp)) { Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             Text(game.uppercase(), color = Green, fontSize = 12.sp, letterSpacing = 1.5.sp)
                             Text(when(game) { "Minecraft" -> "Try a lower render distance, reduce fancy graphics and particles, and use a stable frame-rate target."; "Roblox" -> "Lower the in-game graphics quality if the experience stutters, and close overlays you do not need."; else -> "Start with the game's own performance settings and your phone's built-in gaming mode." }, fontSize = 15.sp)
